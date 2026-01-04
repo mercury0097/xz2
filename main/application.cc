@@ -23,6 +23,12 @@ constexpr int64_t kTouchStartAckTimeoutUs = 700'000; // 700ms
 #include "pet_system.h"
 #include "settings.h"
 
+// 🔧 Pet-like Life System Integration
+#ifdef BOARD_PALQIQI
+#include "boards/palqiqi/life_loop.h"
+#include "boards/palqiqi/speech_wrapper.h"
+#endif
+
 #include <arpa/inet.h>
 #include <cJSON.h>
 #include <cstring>
@@ -627,9 +633,32 @@ void Application::Start() {
         auto text = cJSON_GetObjectItem(root, "text");
         if (cJSON_IsString(text)) {
           ESP_LOGI(TAG, "<< %s", text->valuestring);
+          
+          #ifdef BOARD_PALQIQI
+          // 🔧 PATCH 3: Process through SpeechWrapper for delayed confirmation
+          Schedule([this, display, original = std::string(text->valuestring)]() {
+            auto& wrapper = SpeechWrapper::GetInstance();
+            std::string processed = wrapper.ProcessResponse(original);
+            
+            // Output processed text (may be original, ACK, or empty if cached)
+            if (!processed.empty()) {
+              display->SetChatMessage("assistant", processed.c_str());
+            }
+            
+            // Check for delayed confirmation (after DONE ACK)
+            std::string delayed = wrapper.GetDelayedConfirmation();
+            if (!delayed.empty()) {
+              // Small delay before confirmation (looks more natural)
+              vTaskDelay(pdMS_TO_TICKS(300));
+              display->SetChatMessage("assistant", delayed.c_str());
+            }
+          });
+          #else
+          // Original behavior for other boards
           Schedule([this, display, message = std::string(text->valuestring)]() {
             display->SetChatMessage("assistant", message.c_str());
           });
+          #endif
         }
       }
     } else if (strcmp(type->valuestring, "stt") == 0) {
@@ -917,6 +946,11 @@ void Application::SetDeviceState(DeviceState state) {
     // This is critical for VAD to work after state transitions
     audio_service_.EnableVoiceProcessing(true);
     audio_service_.EnableWakeWordDetection(false);
+    
+    // 🔧 Notify LifeLoop: user interaction started
+    #ifdef BOARD_PALQIQI
+    LifeLoop::GetInstance().NotifyInteraction();
+    #endif
     break;
   case kDeviceStateSpeaking:
     display->SetStatus(Lang::Strings::SPEAKING);
@@ -1236,6 +1270,11 @@ void Application::SendTouchStartSequence() {
   // This triggers the server to respond
   ESP_LOGI(TAG, "Touch: sending wake word: %s", kTouchMessage);
   protocol_->SendWakeWordDetected(kTouchMessage);
+
+  // 🔧 Notify LifeLoop: user interaction (touch)
+  #ifdef BOARD_PALQIQI
+  LifeLoop::GetInstance().NotifyInteraction();
+  #endif
 
   // 4. Set listening mode based on AEC capability
   // If AEC is off, we must use AutoStop to avoid recording the speaker output

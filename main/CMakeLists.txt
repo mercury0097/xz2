@@ -506,6 +506,8 @@ elseif(CONFIG_BOARD_TYPE_PALQIQI)
     set(BOARD_TYPE "palqiqi")
     set(BUILTIN_TEXT_FONT font_puhui_16_4)
     set(BUILTIN_ICON_FONT font_awesome_16_4)
+    # Add Palqiqi specific include directory and force source re-scan
+    list(APPEND INCLUDE_DIRS "boards/palqiqi")
 elseif(CONFIG_BOARD_TYPE_ELECTRON_BOT)
     set(BOARD_TYPE "electron-bot")
     set(BUILTIN_TEXT_FONT font_puhui_20_4)
