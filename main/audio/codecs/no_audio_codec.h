@@ -5,6 +5,7 @@
 
 #include <driver/gpio.h>
 #include <driver/i2s_pdm.h>
+#include <array>
 #include <mutex>
 
 class NoAudioCodec : public AudioCodec {
@@ -44,7 +45,7 @@ private:
     // 🎯 AEC 延迟补偿：播放到麦克风采集的延迟（约 30-50ms）
     // 16kHz 采样率下，40ms = 640 samples
     static constexpr size_t kAecDelaySamples = 640;  // 40ms 延迟补偿
-    std::vector<int16_t> ref_buffer_;
+    std::array<int16_t, kRefBufferSize> ref_buffer_{};
     size_t ref_write_pos_ = 0;
     std::mutex ref_mutex_;
 };

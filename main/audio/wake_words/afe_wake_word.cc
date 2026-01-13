@@ -82,7 +82,8 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
     afe_config->aec_mode = AEC_MODE_SR_LOW_COST;
     afe_config->afe_perferred_core = 1;
     afe_config->afe_perferred_priority = 3;  // 提高优先级，避免 ringbuffer 溢出
-    afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
+    // 🎯 使用 MORE_INTERNAL 策略：唤醒词检测需要低延迟
+    afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_INTERNAL;
     afe_config->afe_ringbuf_size = 50;  // 增加 ringbuffer 大小
     
     // 唤醒词检测阶段不启用降噪，避免 CPU 过载

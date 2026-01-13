@@ -3,6 +3,7 @@
 #include <driver/gpio.h>
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <esp_heap_caps.h>
 
 namespace {
 constexpr const char* kTag = "TouchHandler";
@@ -150,42 +151,130 @@ esp_err_t TouchHandler::Start(TouchCallback callback) {
     ESP_LOGI(kTag, "   🔌 Wiring: Sensor-OUT → GPIO13, Sensor-VCC → 3.3V, Sensor-GND → GND");
     ESP_LOGI(kTag, "   📊 Initial GPIO level: %s", initial_level ? "HIGH" : "LOW");
 
-    // 创建回调分发任务
-    BaseType_t callback_task_ret = xTaskCreatePinnedToCore(
-        TouchCallbackTask,
-        "touch_cb",
-        4096,
-        this,
-        3,
-        &callback_task_handle_,
-        1
-    );
+    // 记录内存状态
+    ESP_LOGI(kTag, "📊 Memory before task creation:");
+    ESP_LOGI(kTag, "   Free heap: %lu bytes", esp_get_free_heap_size());
+    ESP_LOGI(kTag, "   Min free heap: %lu bytes", esp_get_minimum_free_heap_size());
+    ESP_LOGI(kTag, "   Free internal: %lu bytes", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    ESP_LOGI(kTag, "   Free PSRAM: %lu bytes", heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
-    if (callback_task_ret != pdPASS) {
-        ESP_LOGW(kTag, "Failed to create touch callback dispatcher task, fallback to direct callback execution");
-        callback_task_handle_ = nullptr;
+    // 第一阶段: 创建回调分发任务（使用PSRAM栈）
+    // TCB 必须在内部 RAM（FreeRTOS 要求）
+    callback_task_buffer_ = (StaticTask_t*)heap_caps_malloc(
+        sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    // 栈可以在 PSRAM（节省内部 RAM）
+    callback_task_stack_ = (StackType_t*)heap_caps_malloc(
+        4096 * sizeof(StackType_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+
+    if (callback_task_buffer_ && callback_task_stack_) {
+        ESP_LOGI(kTag, "✅ Callback task: TCB in Internal RAM, Stack in PSRAM (4KB)");
+        callback_task_handle_ = xTaskCreateStaticPinnedToCore(
+            TouchCallbackTask,
+            "touch_cb",
+            4096,
+            this,
+            3,
+            callback_task_stack_,
+            callback_task_buffer_,
+            1
+        );
+    } else {
+        // 静态分配失败，回退到动态分配
+        if (callback_task_buffer_) {
+            heap_caps_free(callback_task_buffer_);
+            callback_task_buffer_ = nullptr;
+        }
+        if (callback_task_stack_) {
+            heap_caps_free(callback_task_stack_);
+            callback_task_stack_ = nullptr;
+        }
+        ESP_LOGW(kTag, "⚠️  Callback task: Static allocation failed, using dynamic allocation");
+
+        BaseType_t callback_task_ret = xTaskCreatePinnedToCore(
+            TouchCallbackTask,
+            "touch_cb",
+            4096,
+            this,
+            3,
+            &callback_task_handle_,
+            1
+        );
+
+        if (callback_task_ret != pdPASS) {
+            ESP_LOGW(kTag, "Failed to create touch callback dispatcher task, fallback to direct callback execution");
+            callback_task_handle_ = nullptr;
+        } else {
+            ESP_LOGI(kTag, "✅ Callback task created successfully (dynamic allocation)");
+        }
     }
 
-    // 创建检测任务
-    BaseType_t task_ret = xTaskCreatePinnedToCore(
-        TouchDetectionTask,
-        "touch_detect",
-        4096,
-        this,
-        3,
-        &task_handle_,
-        1
-    );
+    // 第二阶段: 创建检测任务（使用PSRAM栈）
+    // TCB 必须在内部 RAM（FreeRTOS 要求）
+    task_buffer_ = (StaticTask_t*)heap_caps_malloc(
+        sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    // 栈可以在 PSRAM（节省内部 RAM）
+    task_stack_ = (StackType_t*)heap_caps_malloc(
+        4096 * sizeof(StackType_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
-    if (task_ret != pdPASS) {
-        ESP_LOGE(kTag, "Failed to create touch detection task");
-        if (callback_task_handle_ != nullptr) {
-            vTaskDelete(callback_task_handle_);
-            callback_task_handle_ = nullptr;
+    if (task_buffer_ && task_stack_) {
+        ESP_LOGI(kTag, "✅ Detection task: TCB in Internal RAM, Stack in PSRAM (4KB)");
+        task_handle_ = xTaskCreateStaticPinnedToCore(
+            TouchDetectionTask,
+            "touch_detect",
+            4096,
+            this,
+            3,
+            task_stack_,
+            task_buffer_,
+            1
+        );
+    } else {
+        // 静态分配失败，回退到动态分配
+        if (task_buffer_) {
+            heap_caps_free(task_buffer_);
+            task_buffer_ = nullptr;
         }
-        gpio_isr_handler_remove(gpio_pin_);
-        running_ = false;
-        return ESP_FAIL;
+        if (task_stack_) {
+            heap_caps_free(task_stack_);
+            task_stack_ = nullptr;
+        }
+        ESP_LOGW(kTag, "⚠️  Detection task: Static allocation failed, using dynamic allocation");
+
+        BaseType_t task_ret = xTaskCreatePinnedToCore(
+            TouchDetectionTask,
+            "touch_detect",
+            4096,
+            this,
+            3,
+            &task_handle_,
+            1
+        );
+
+        if (task_ret != pdPASS) {
+            ESP_LOGE(kTag, "❌ Failed to create touch detection task");
+            ESP_LOGE(kTag, "   Free heap: %lu bytes", esp_get_free_heap_size());
+            ESP_LOGE(kTag, "   Free internal: %lu bytes", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+            
+            // 清理回调任务
+            if (callback_task_handle_ != nullptr) {
+                vTaskDelete(callback_task_handle_);
+                callback_task_handle_ = nullptr;
+            }
+            if (callback_task_buffer_) {
+                heap_caps_free(callback_task_buffer_);
+                callback_task_buffer_ = nullptr;
+            }
+            if (callback_task_stack_) {
+                heap_caps_free(callback_task_stack_);
+                callback_task_stack_ = nullptr;
+            }
+            
+            gpio_isr_handler_remove(gpio_pin_);
+            running_ = false;
+            return ESP_FAIL;
+        } else {
+            ESP_LOGI(kTag, "✅ Detection task created successfully (dynamic allocation)");
+        }
     }
 
     ESP_LOGI(kTag, "Touch handler started successfully on CPU1 (GPIO13)");
@@ -210,14 +299,32 @@ void TouchHandler::Stop() {
     // 等待任务结束
     vTaskDelay(pdMS_TO_TICKS(100));
 
+    // 删除回调任务并释放静态分配的内存
     if (callback_task_handle_ != nullptr) {
         vTaskDelete(callback_task_handle_);
         callback_task_handle_ = nullptr;
     }
+    if (callback_task_stack_ != nullptr) {
+        heap_caps_free(callback_task_stack_);
+        callback_task_stack_ = nullptr;
+    }
+    if (callback_task_buffer_ != nullptr) {
+        heap_caps_free(callback_task_buffer_);
+        callback_task_buffer_ = nullptr;
+    }
 
+    // 删除检测任务并释放静态分配的内存
     if (task_handle_ != nullptr) {
         vTaskDelete(task_handle_);
         task_handle_ = nullptr;
+    }
+    if (task_stack_ != nullptr) {
+        heap_caps_free(task_stack_);
+        task_stack_ = nullptr;
+    }
+    if (task_buffer_ != nullptr) {
+        heap_caps_free(task_buffer_);
+        task_buffer_ = nullptr;
     }
 
     // 清理GPIO中断

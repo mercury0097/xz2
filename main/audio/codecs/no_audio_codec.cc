@@ -389,9 +389,6 @@ NoAudioCodecSimplexAec::NoAudioCodecSimplexAec(int input_sample_rate, int output
     input_sample_rate_ = input_sample_rate;
     output_sample_rate_ = output_sample_rate;
     
-    // 初始化参考信号缓冲区
-    ref_buffer_.resize(kRefBufferSize, 0);
-    
     ESP_LOGI(TAG, "NoAudioCodecSimplexAec: 软件 AEC 参考信号已启用");
 
     // Create a new channel for speaker
@@ -525,10 +522,10 @@ int NoAudioCodecSimplexAec::Read(int16_t* dest, int samples) {
             int32_t value = bit32_buffer[i] >> 12;
             dest[i * 2] = (value > INT16_MAX) ? INT16_MAX : (value < -INT16_MAX) ? -INT16_MAX : (int16_t)value;
             
-            // 参考数据：从 write_pos 往回偏移 kAecDelaySamples
-            // 这样参考信号就和麦克风采集到的回声时间对齐了
-            size_t ref_pos = (ref_write_pos_ + kRefBufferSize - kAecDelaySamples - actual_mic_samples + i) % kRefBufferSize;
-            dest[i * 2 + 1] = ref_buffer_[ref_pos];
+            // 🎯 临时方案：参考通道填充0（禁用参考信号）
+            // 这样 AFE 虽然期望 2 通道，但参考通道为静音，不会干扰 VAD
+            // TODO: 未来实现动态切换单/双通道配置
+            dest[i * 2 + 1] = 0;  // 参考通道静音
         }
     }
     

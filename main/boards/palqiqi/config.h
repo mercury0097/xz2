@@ -33,15 +33,15 @@
 #define DISPLAY_CS_PIN GPIO_NUM_12
 
 #define LCD_TYPE_ST7789_SERIAL
-#define DISPLAY_WIDTH 240
-#define DISPLAY_HEIGHT 240
-#define DISPLAY_MIRROR_X true
-#define DISPLAY_MIRROR_Y true
-#define DISPLAY_SWAP_XY false
+#define DISPLAY_WIDTH 320    // 横屏优化: 从240改为320
+#define DISPLAY_HEIGHT 240   // 横屏优化: 从320改为240
+#define DISPLAY_MIRROR_X false  // 横屏优化: 尝试另一种镜像组合
+#define DISPLAY_MIRROR_Y true   // 横屏优化: 修复上下颠倒
+#define DISPLAY_SWAP_XY true    // 横屏优化: 启用坐标轴交换
 #define DISPLAY_INVERT_COLOR true
 #define DISPLAY_RGB_ORDER LCD_RGB_ELEMENT_ORDER_RGB
 #define DISPLAY_OFFSET_X 0
-#define DISPLAY_OFFSET_Y 80
+#define DISPLAY_OFFSET_Y 0
 #define DISPLAY_BACKLIGHT_OUTPUT_INVERT false
 #define DISPLAY_SPI_MODE 3
 

@@ -25,7 +25,7 @@ bool AudioCodec::InputData(std::vector<int16_t> &data) {
 }
 
 void AudioCodec::Start() {
-  constexpr int kDefaultVolume = 100; // 开机默认最大音量
+  constexpr int kDefaultVolume = 70; // 开机默认音量
 
   // 强制使用最大音量,不读取 NVS 中的旧值
   output_volume_ = kDefaultVolume;

@@ -37,6 +37,7 @@ private:
     AudioCodec* codec_ = nullptr;
     int frame_samples_ = 0;
     bool is_speaking_ = false;
+    bool has_reference_ = false;  // 是否有参考通道（支持 AEC）
     std::vector<int16_t> output_buffer_;
 
     void AudioProcessorTask();

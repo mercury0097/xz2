@@ -32,6 +32,12 @@ private:
     gpio_num_t gpio_pin_ = GPIO_NUM_13;
     volatile bool interrupt_triggered_ = false;
 
+    // 静态任务内存管理（用于PSRAM栈分配）
+    StaticTask_t* task_buffer_ = nullptr;
+    StackType_t* task_stack_ = nullptr;
+    StaticTask_t* callback_task_buffer_ = nullptr;
+    StackType_t* callback_task_stack_ = nullptr;
+
     // GPIO中断处理函数（必须在IRAM中）
     static void IRAM_ATTR GpioIsrHandler(void* arg);
     

@@ -165,7 +165,7 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io,
       .io_handle = panel_io_,
       .panel_handle = panel_,
       .control_handle = nullptr,
-      .buffer_size = static_cast<uint32_t>(width_ * 20),
+      .buffer_size = static_cast<uint32_t>(width_ * 20),  // 恢复20行（启用PSRAM后内存充足）
       .double_buffer = false,
       .trans_size = 0,
       .hres = static_cast<uint32_t>(width_),
@@ -181,7 +181,7 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io,
       .flags =
           {
               .buff_dma = 1,
-              .buff_spiram = 0,
+              .buff_spiram = 0,  // 暂时使用内部RAM，PSRAM初始化时机问题
               .sw_rotate = 0,
               .swap_bytes = 1,
               .full_refresh = 0,
@@ -228,7 +228,7 @@ RgbLcdDisplay::RgbLcdDisplay(esp_lcd_panel_io_handle_t panel_io,
   const lvgl_port_display_cfg_t display_cfg = {
       .io_handle = panel_io_,
       .panel_handle = panel_,
-      .buffer_size = static_cast<uint32_t>(width_ * 20),
+      .buffer_size = static_cast<uint32_t>(width_ * 20),  // 恢复20行（启用PSRAM后内存充足）
       .double_buffer = true,
       .hres = static_cast<uint32_t>(width_),
       .vres = static_cast<uint32_t>(height_),

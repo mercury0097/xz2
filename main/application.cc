@@ -394,12 +394,13 @@ void Application::Start() {
   ESP_LOGI(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
   ESP_LOGI(TAG, "🧠 初始化智能学习系统 (NVS存储):");
 
-  auto &event_bus = xiaozhi::EventBus::GetInstance();
-  if (event_bus.Initialize() == ESP_OK) {
-    ESP_LOGI(TAG, "  ✅ 事件总线初始化成功");
-  } else {
-    ESP_LOGE(TAG, "  ❌ 事件总线初始化失败");
-  }
+  // ⚠️  已禁用EventBus以节省内存（横屏优化）
+  // auto &event_bus = xiaozhi::EventBus::GetInstance();
+  // if (event_bus.Initialize() == ESP_OK) {
+  //   ESP_LOGI(TAG, "  ✅ 事件总线初始化成功");
+  // } else {
+  //   ESP_LOGE(TAG, "  ❌ 事件总线初始化失败");
+  // }
 
   // ⚠️  已禁用学习系统以节省CPU和内存资源
   // auto &user_profile = xiaozhi::UserProfile::GetInstance();
@@ -441,7 +442,7 @@ void Application::Start() {
   //   ESP_LOGW(TAG, "  ⚠️  情绪记忆系统初始化失败，使用默认值");
   // }
   
-  ESP_LOGI(TAG, "  ⚠️  学习系统已禁用以节省资源");
+  ESP_LOGI(TAG, "  ⚠️  事件总线和学习系统已禁用以节省内存");
 
   // 📡 注册事件监听器（已禁用，学习系统已关闭）
   // event_bus.Subscribe(xiaozhi::LOGIC_EVENT, xiaozhi::LOGIC_CONVERSATION_END,
@@ -921,12 +922,15 @@ void Application::SetDeviceState(DeviceState state) {
   case kDeviceStateSpeaking:
     display->SetStatus(Lang::Strings::SPEAKING);
 
-    //  ⚠️  Barge-in 暂时禁用：ESP-SR AFE 不支持 AEC + VAD 同时运行
-    // Speaking 状态下关闭音频处理，避免 CPU 过载和 Ringbuffer 溢出
-    // 用户仍可在 Listening 状态时打断（说话时机器人会停止说话并监听）
-    if (listening_mode_ != kListeningModeRealtime) {
+    // 🎯 Barge-in 支持：Speaking 状态下启用 AEC，支持用户打断
+    // AFE 策略：AEC ON, VAD OFF（播放时不录音，但支持唤醒词打断）
+    if (listening_mode_ == kListeningModeRealtime) {
+      // Realtime 模式：保持音频处理器运行，切换到 AEC 模式
+      audio_service_.EnableDeviceAec(true);  // 启用 AEC，禁用 VAD
+      audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
+    } else {
+      // 非 Realtime 模式：关闭音频处理器（省CPU）
       audio_service_.EnableVoiceProcessing(false);
-      // Only AFE wake word can be detected in speaking mode
       audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
     }
     audio_service_.ResetDecoder();

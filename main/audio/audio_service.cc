@@ -1,6 +1,7 @@
 #include "audio_service.h"
 #include <cstring>
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <model_path.h>
 
 #if CONFIG_USE_AUDIO_PROCESSOR
@@ -21,6 +22,16 @@
 AudioService::AudioService() { event_group_ = xEventGroupCreate(); }
 
 AudioService::~AudioService() {
+  // 释放 opus_codec 任务的静态分配内存（如果未释放）
+  if (opus_codec_task_stack_ != nullptr) {
+    heap_caps_free(opus_codec_task_stack_);
+    opus_codec_task_stack_ = nullptr;
+  }
+  if (opus_codec_task_buffer_ != nullptr) {
+    heap_caps_free(opus_codec_task_buffer_);
+    opus_codec_task_buffer_ = nullptr;
+  }
+  
   if (event_group_ != nullptr) {
     vEventGroupDelete(event_group_);
   }
@@ -123,16 +134,51 @@ void AudioService::Start() {
       "audio_output", 2048, this, 4, &audio_output_task_handle_);
 #endif
 
-  /* Start the opus codec task */
-  xTaskCreate(
-      [](void *arg) {
-        AudioService *audio_service = (AudioService *)arg;
-        audio_service->OpusCodecTask();
-        vTaskDelete(NULL);
-      },
-      "opus_codec", 2048 * 16, this,
-      5,                         // 增加栈大小到32KB,防止音频增益处理导致栈溢出
-      &opus_codec_task_handle_); // 优先级提高到5,确保及时解码
+  /* Start the opus codec task - 使用 PSRAM 栈 */
+  // TCB 必须在内部 RAM（FreeRTOS 要求）
+  opus_codec_task_buffer_ = (StaticTask_t*)heap_caps_malloc(
+      sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  // 栈可以在 PSRAM（节省内部 RAM）
+  opus_codec_task_stack_ = (StackType_t*)heap_caps_malloc(
+      2048 * 16 * sizeof(StackType_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+
+  if (opus_codec_task_buffer_ && opus_codec_task_stack_) {
+    ESP_LOGI(TAG, "✅ opus_codec task: TCB in Internal RAM, Stack in PSRAM (32KB)");
+    opus_codec_task_handle_ = xTaskCreateStatic(
+        [](void *arg) {
+          AudioService *audio_service = (AudioService *)arg;
+          audio_service->OpusCodecTask();
+          vTaskDelete(NULL);
+        },
+        "opus_codec",
+        2048 * 16,
+        this,
+        5,
+        opus_codec_task_stack_,
+        opus_codec_task_buffer_
+    );
+  } else {
+    // 静态分配失败，回退到动态分配
+    if (opus_codec_task_buffer_) {
+      heap_caps_free(opus_codec_task_buffer_);
+      opus_codec_task_buffer_ = nullptr;
+    }
+    if (opus_codec_task_stack_) {
+      heap_caps_free(opus_codec_task_stack_);
+      opus_codec_task_stack_ = nullptr;
+    }
+    ESP_LOGW(TAG, "⚠️  opus_codec task: Static allocation failed, using dynamic allocation");
+    
+    xTaskCreate(
+        [](void *arg) {
+          AudioService *audio_service = (AudioService *)arg;
+          audio_service->OpusCodecTask();
+          vTaskDelete(NULL);
+        },
+        "opus_codec", 2048 * 16, this,
+        5,                         // 增加栈大小到32KB,防止音频增益处理导致栈溢出
+        &opus_codec_task_handle_); // 优先级提高到5,确保及时解码
+  }
 }
 
 void AudioService::Stop() {
@@ -148,6 +194,16 @@ void AudioService::Stop() {
   audio_playback_queue_.clear();
   audio_testing_queue_.clear();
   audio_queue_cv_.notify_all();
+  
+  // 释放 opus_codec 任务的静态分配内存
+  if (opus_codec_task_stack_ != nullptr) {
+    heap_caps_free(opus_codec_task_stack_);
+    opus_codec_task_stack_ = nullptr;
+  }
+  if (opus_codec_task_buffer_ != nullptr) {
+    heap_caps_free(opus_codec_task_buffer_);
+    opus_codec_task_buffer_ = nullptr;
+  }
 }
 
 bool AudioService::ReadAudioData(std::vector<int16_t> &data, int sample_rate,
@@ -231,7 +287,9 @@ void AudioService::AudioInputTask() {
     }
     if (audio_input_need_warmup_) {
       audio_input_need_warmup_ = false;
-      vTaskDelay(pdMS_TO_TICKS(120));
+      ESP_LOGI(TAG, "⏰ AFE 预热中，等待 200ms...");
+      vTaskDelay(pdMS_TO_TICKS(200));  // 从 120ms 增加到 200ms
+      ESP_LOGI(TAG, "✅ AFE 预热完成，开始喂数据");
       continue;
     }
 
@@ -275,15 +333,22 @@ void AudioService::AudioInputTask() {
 
     /* Feed the audio processor */
     if (bits & AS_EVENT_AUDIO_PROCESSOR_RUNNING) {
+      static int feed_count = 0;
       std::vector<int16_t> data;
       int samples = audio_processor_->GetFeedSize();
-      if (samples > 0) {
-        if (ReadAudioData(data, 16000, samples)) {
-          audio_processor_->Feed(std::move(data));
-          // 让出 CPU，避免 AFE 处理时间过长导致看门狗超时
-          taskYIELD();
-          continue;
-        }
+      if (samples <= 0) {
+        ESP_LOGW(TAG, "⚠️  AudioProcessor GetFeedSize() = %d，无法喂数据", samples);
+        vTaskDelay(pdMS_TO_TICKS(10));
+        continue;
+      }
+      if (ReadAudioData(data, 16000, samples)) {
+        audio_processor_->Feed(std::move(data));
+        feed_count++;
+        // 让出 CPU，避免 AFE 处理时间过长导致看门狗超时
+        taskYIELD();
+        continue;
+      } else {
+        ESP_LOGE(TAG, "❌ ReadAudioData 失败！");
       }
     }
 
@@ -567,14 +632,16 @@ void AudioService::EnableWakeWordDetection(bool enable) {
     return;
   }
 
-  ESP_LOGD(TAG, "%s wake word detection", enable ? "Enabling" : "Disabling");
+  ESP_LOGI(TAG, "%s wake word detection", enable ? "👂 启用唤醒词检测" : "⏸️  禁用唤醒词检测");
   if (enable) {
     if (!wake_word_initialized_) {
+      ESP_LOGI(TAG, "📦 正在初始化唤醒词检测（AFE WakeWord）...");
       if (!wake_word_->Initialize(codec_, models_list_)) {
-        ESP_LOGE(TAG, "Failed to initialize wake word");
+        ESP_LOGE(TAG, "❌ 唤醒词初始化失败");
         return;
       }
       wake_word_initialized_ = true;
+      ESP_LOGI(TAG, "✅ 唤醒词检测初始化完成");
 
       // 设置唤醒词检测回调
       wake_word_->OnWakeWordDetected([this](const std::string &wake_word) {
@@ -586,19 +653,24 @@ void AudioService::EnableWakeWordDetection(bool enable) {
     }
     wake_word_->Start();
     xEventGroupSetBits(event_group_, AS_EVENT_WAKE_WORD_RUNNING);
+    ESP_LOGI(TAG, "✅ 唤醒词检测已启动");
   } else {
+    ESP_LOGI(TAG, "🛑 正在停止唤醒词检测...");
     wake_word_->Stop();
     xEventGroupClearBits(event_group_, AS_EVENT_WAKE_WORD_RUNNING);
+    ESP_LOGI(TAG, "✅ 唤醒词检测已停止，AFE buffer 已清空");
   }
 }
 
 void AudioService::EnableVoiceProcessing(bool enable) {
-  ESP_LOGD(TAG, "%s voice processing", enable ? "Enabling" : "Disabling");
+  ESP_LOGI(TAG, "%s voice processing", enable ? "🎤 启用" : "⏸️  禁用");
   if (enable) {
     if (!audio_processor_initialized_) {
+      ESP_LOGI(TAG, "📦 正在初始化音频处理器（AFE）...");
       audio_processor_->Initialize(codec_, OPUS_FRAME_DURATION_MS,
                                    models_list_);
       audio_processor_initialized_ = true;
+      ESP_LOGI(TAG, "✅ 音频处理器初始化完成");
     }
 
     /* We should make sure no audio is playing */
@@ -606,6 +678,7 @@ void AudioService::EnableVoiceProcessing(bool enable) {
     audio_input_need_warmup_ = true;
     audio_processor_->Start();
     xEventGroupSetBits(event_group_, AS_EVENT_AUDIO_PROCESSOR_RUNNING);
+    ESP_LOGI(TAG, "✅ 音频处理器已启动，开始监听...");
   } else {
     audio_processor_->Stop();
     xEventGroupClearBits(event_group_, AS_EVENT_AUDIO_PROCESSOR_RUNNING);
